@@ -74,7 +74,7 @@ router.get('/tenants/:id/check-arrears', (req, res) => {
 
 router.get('/repair-requests', (req, res) => {
   const db = getDb();
-  const { role, userId, tenantId, status } = req.query;
+  const { role, userId, tenantId, status, current_approver } = req.query;
   let sql = `
     SELECT r.*, t.name as tenant_name, t.room_number, rt.name as type_name, rt.is_safety,
            s.code as subject_code, s.name as subject_name
@@ -89,9 +89,19 @@ router.get('/repair-requests', (req, res) => {
     sql += ' AND r.tenant_id = ?';
     params.push(Number(tenantId));
   }
+  if (role === 'supervisor') {
+    sql += " AND r.current_approver = 'supervisor' AND r.status = 'manager_approved'";
+  }
+  if (role === 'housing_manager' && !status) {
+    sql += " AND (r.current_approver = 'housing_manager' OR r.status = 'submitted')";
+  }
   if (status) {
     sql += ' AND r.status = ?';
     params.push(status);
+  }
+  if (current_approver) {
+    sql += ' AND r.current_approver = ?';
+    params.push(current_approver);
   }
   sql += ' ORDER BY r.created_at DESC';
   res.json(db.prepare(sql).all(...params));
@@ -163,7 +173,7 @@ router.post('/repair-requests', (req, res) => {
       requestNo, tenant_id, repair_type_id, subject_id || null, title, description || null,
       room_number, contact_phone || null, urgency || 'normal', estimated_amount || 0,
       arrearsInfo.hasArrears ? 1 : 0, arrearsInfo.arrearsAmount || 0,
-      needReview ? 1 : 0, needReview ? 'supervisor' : 'housing_manager'
+      needReview ? 1 : 0, 'housing_manager'
     );
 
     const rid = info.lastInsertRowid;
@@ -261,6 +271,10 @@ router.post('/repair-requests/:id/approve', (req, res) => {
     return res.status(400).json({ error: '操作类型错误' });
   }
 
+  if (action === 'approve' && approver_role === 'housing_manager' && !subject_id) {
+    return res.status(400).json({ error: '房管审核必须选择费用科目' });
+  }
+
   if (action === 'approve' && approver_role === 'housing_manager' && subject_id) {
     const budgetCheck = rules.checkBudgetAvailability(subject_id, estimated_amount || request.estimated_amount);
     if (!budgetCheck.passed) return res.status(400).json({ error: budgetCheck.reason });
@@ -271,11 +285,35 @@ router.post('/repair-requests/:id/approve', (req, res) => {
     if (!priceCheck.passed) return res.status(400).json({ error: priceCheck.reason });
   }
 
+  if (action === 'approve' && approver_role === 'supervisor') {
+    if (request.status !== 'manager_approved') {
+      return res.status(400).json({ error: '房管尚未审核通过，主管不能复核' });
+    }
+    if (!request.budget_frozen) {
+      return res.status(400).json({ error: '预算尚未冻结，请先由房管完成预算冻结' });
+    }
+    if (!request.subject_id) {
+      return res.status(400).json({ error: '费用科目尚未确定，请先由房管选择费用科目' });
+    }
+    if (!request.estimated_amount || request.estimated_amount <= 0) {
+      return res.status(400).json({ error: '金额尚未确认，请先由房管确认金额' });
+    }
+  }
+
   const tx = db.transaction(() => {
     const chain = db.prepare(
       "SELECT * FROM approval_chains WHERE request_id = ? AND approver_role = ? AND status = 'pending' ORDER BY step LIMIT 1"
     ).get(id, approver_role);
     if (!chain) return { error: '无待审批步骤' };
+
+    if (chain.step > 1) {
+      const prevStep = db.prepare(
+        "SELECT * FROM approval_chains WHERE request_id = ? AND step = ? LIMIT 1"
+      ).get(id, chain.step - 1);
+      if (!prevStep || prevStep.status !== 'approved') {
+        return { error: '前序审批步骤尚未通过，不能跳级审批' };
+      }
+    }
 
     db.prepare(`
       UPDATE approval_chains
@@ -284,16 +322,21 @@ router.post('/repair-requests/:id/approve', (req, res) => {
     `).run(action === 'approve' ? 'approved' : 'rejected', approver_id, approver_name, comment, chain.id);
 
     if (action === 'reject') {
-      db.prepare("UPDATE repair_requests SET status = 'rejected', updated_at = datetime('now','localtime') WHERE id = ?").run(id);
+      db.prepare("UPDATE repair_requests SET status = 'rejected', current_approver = NULL, updated_at = datetime('now','localtime') WHERE id = ?").run(id);
       return { ok: true, status: 'rejected' };
     }
 
-    const remainingPending = db.prepare(
-      "SELECT COUNT(*) as cnt FROM approval_chains WHERE request_id = ? AND status = 'pending'"
-    ).get(id).cnt;
+    const nextStep = db.prepare(
+      "SELECT * FROM approval_chains WHERE request_id = ? AND step > ? AND status = 'pending' ORDER BY step LIMIT 1"
+    ).get(id, chain.step);
 
     let newStatus = request.status;
-    if (remainingPending === 0) {
+    let nextApprover = null;
+
+    if (nextStep) {
+      nextApprover = nextStep.approver_role;
+      newStatus = 'manager_approved';
+    } else {
       newStatus = 'approved';
     }
 
@@ -320,19 +363,19 @@ router.post('/repair-requests/:id/approve', (req, res) => {
           final_amount = COALESCE(?, final_amount),
           warranty_amount = COALESCE(?, warranty_amount),
           budget_frozen = CASE WHEN ? IS NOT NULL THEN 1 ELSE budget_frozen END,
-          current_approver = CASE WHEN ? > 0 THEN NULL ELSE current_approver END,
+          current_approver = ?,
           updated_at = datetime('now','localtime')
       WHERE id = ?
     `).run(newStatus, subject_id, estimated_amount, final_amount, warrantyAmt,
-          freezeInfo ? freezeInfo.lastInsertRowid : null, remainingPending, id);
+          freezeInfo ? freezeInfo.lastInsertRowid : null, nextApprover, id);
 
-    if (remainingPending === 0) {
+    if (!nextStep) {
       db.prepare(
         "UPDATE construction_progress SET status = 'completed' WHERE request_id = ? AND step = 'approved'"
       ).run(id);
     }
 
-    return { ok: true, status: newStatus };
+    return { ok: true, status: newStatus, nextApprover };
   });
 
   try {
@@ -591,8 +634,8 @@ router.get('/stats', (req, res) => {
   const frozenBudget = db.prepare('SELECT COALESCE(SUM(frozen_amount),0) as total FROM annual_budgets').get().total;
   const fundBalance = db.prepare('SELECT COALESCE(SUM(balance),0) as total FROM repair_fund_accounts').get().total;
 
-  const pendingManager = db.prepare("SELECT COUNT(*) as cnt FROM repair_requests WHERE status = 'submitted'").get().cnt;
-  const pendingSupervisor = db.prepare("SELECT COUNT(*) as cnt FROM repair_requests WHERE status = 'manager_approved' OR (status = 'submitted' AND need_supervisor_review = 1)").get().cnt;
+  const pendingManager = db.prepare("SELECT COUNT(*) as cnt FROM repair_requests WHERE status = 'submitted' AND current_approver = 'housing_manager'").get().cnt;
+  const pendingSupervisor = db.prepare("SELECT COUNT(*) as cnt FROM repair_requests WHERE status = 'manager_approved' AND current_approver = 'supervisor'").get().cnt;
   const inConstruction = db.prepare("SELECT COUNT(*) as cnt FROM repair_requests WHERE status = 'in_construction'").get().cnt;
   const awaitingAcceptance = db.prepare("SELECT COUNT(*) as cnt FROM repair_requests WHERE status = 'awaiting_acceptance'").get().cnt;
   const accepted = db.prepare("SELECT COUNT(*) as cnt FROM repair_requests WHERE status = 'accepted'").get().cnt;

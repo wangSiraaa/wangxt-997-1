@@ -19,6 +19,7 @@ import {
 const statusMap = {
   draft: { text: '草稿', color: 'default' },
   submitted: { text: '已提交', color: 'processing' },
+  manager_approved: { text: '房管已通过', color: 'blue' },
   approved: { text: '已审批', color: 'blue' },
   in_construction: { text: '施工中', color: 'cyan' },
   awaiting_acceptance: { text: '待验收', color: 'orange' },
@@ -83,11 +84,18 @@ export default function RequestDetail({ auth }) {
 
   const pendingApprovalFor = (role) => approvals.some(a => a.approver_role === role && a.status === 'pending');
 
+  const canApprove = (role) => {
+    if (request.current_approver !== role) return false;
+    if (role === 'supervisor' && request.status !== 'manager_approved') return false;
+    if (role === 'housing_manager' && !['submitted', 'manager_rejected'].includes(request.status)) return false;
+    return approvals.some(a => a.approver_role === role && a.status === 'pending');
+  };
+
   const renderActions = () => {
     const btns = [];
     const role = auth.user.role;
 
-    if ((role === 'housing_manager' || role === 'supervisor') && pendingApprovalFor(role)) {
+    if ((role === 'housing_manager' || role === 'supervisor') && canApprove(role)) {
       btns.push(
         <Button key="approve" type="primary" icon={<AuditOutlined />} onClick={() => setApproveModal(true)}>
           {role === 'housing_manager' ? '房管审核' : '主管复核'}
