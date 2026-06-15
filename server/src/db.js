@@ -178,6 +178,10 @@ async function init() {
       qualification_level TEXT,
       qualification_valid_until TEXT,
       status TEXT DEFAULT 'active',
+      warranty_repair_count INTEGER DEFAULT 0,
+      abnormal_quote_count INTEGER DEFAULT 0,
+      key_comparison_count INTEGER DEFAULT 0,
+      last_abnormal_at TEXT,
       created_at TEXT DEFAULT (datetime('now','localtime'))
     );
 
@@ -204,6 +208,16 @@ async function init() {
       paid_amount REAL DEFAULT 0,
       is_paid INTEGER DEFAULT 0,
       warranty_amount REAL DEFAULT 0,
+      is_emergency_repair INTEGER DEFAULT 0,
+      emergency_frozen_amount REAL DEFAULT 0,
+      evidence_recorded INTEGER DEFAULT 0,
+      approval_deadline TEXT,
+      need_key_comparison INTEGER DEFAULT 0,
+      key_comparison_reason TEXT,
+      withdrawn INTEGER DEFAULT 0,
+      withdrawn_at TEXT,
+      cross_year_budget INTEGER DEFAULT 0,
+      budget_year INTEGER,
       created_at TEXT DEFAULT (datetime('now','localtime')),
       updated_at TEXT DEFAULT (datetime('now','localtime'))
     );
@@ -270,6 +284,15 @@ async function init() {
       remark TEXT,
       photos TEXT,
       accepted_at TEXT,
+      stage TEXT DEFAULT 'final',
+      main_body_passed INTEGER DEFAULT 0,
+      material_docs_complete INTEGER DEFAULT 0,
+      material_docs_remark TEXT,
+      invoices_all_verified INTEGER DEFAULT 0,
+      invoices_remark TEXT,
+      warranty_locked INTEGER DEFAULT 0,
+      warranty_lock_remark TEXT,
+      final_payment_allowed INTEGER DEFAULT 0,
       created_at TEXT DEFAULT (datetime('now','localtime'))
     );
 
@@ -324,6 +347,92 @@ async function init() {
       snapshot_type TEXT NOT NULL,
       reference_no TEXT,
       created_at TEXT DEFAULT (datetime('now','localtime'))
+    );
+
+    CREATE TABLE IF NOT EXISTS team_abnormal_records (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      team_id INTEGER NOT NULL,
+      request_id INTEGER,
+      abnormal_type TEXT NOT NULL CHECK(abnormal_type IN ('warranty_repair','abnormal_quote','quality_issue','delay')),
+      description TEXT NOT NULL,
+      amount REAL,
+      operator_id INTEGER,
+      created_at TEXT DEFAULT (datetime('now','localtime'))
+    );
+
+    CREATE TABLE IF NOT EXISTS maintenance_blacklist (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      team_id INTEGER NOT NULL,
+      blacklist_type TEXT NOT NULL CHECK(blacklist_type IN ('warranty','quote','quality','comprehensive')),
+      reason TEXT NOT NULL,
+      effective_date TEXT NOT NULL,
+      expire_date TEXT,
+      status TEXT DEFAULT 'active' CHECK(status IN ('active','expired','revoked')),
+      created_by INTEGER,
+      created_at TEXT DEFAULT (datetime('now','localtime')),
+      revoked_at TEXT,
+      revoked_by INTEGER
+    );
+
+    CREATE TABLE IF NOT EXISTS withdrawal_records (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      request_id INTEGER NOT NULL,
+      withdrawn_by INTEGER NOT NULL,
+      withdrawn_role TEXT NOT NULL,
+      reason TEXT NOT NULL,
+      status TEXT DEFAULT 'withdrawn' CHECK(status IN ('withdrawn','resubmitted','cancelled')),
+      resubmit_request_id INTEGER,
+      created_at TEXT DEFAULT (datetime('now','localtime')),
+      resubmitted_at TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS disbursement_reversals (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      reversal_no TEXT UNIQUE NOT NULL,
+      original_disbursement_id INTEGER NOT NULL,
+      request_id INTEGER NOT NULL,
+      amount REAL NOT NULL,
+      reason TEXT NOT NULL,
+      reversal_type TEXT DEFAULT 'reversal' CHECK(reversal_type IN ('reversal','supplement')),
+      operator_id INTEGER,
+      status TEXT DEFAULT 'pending' CHECK(status IN ('pending','completed','cancelled')),
+      account_id INTEGER NOT NULL,
+      new_disbursement_id INTEGER,
+      created_at TEXT DEFAULT (datetime('now','localtime')),
+      completed_at TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS emergency_evidence (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      request_id INTEGER NOT NULL,
+      evidence_type TEXT NOT NULL CHECK(evidence_type IN ('photo','video','audio','text')),
+      evidence_url TEXT,
+      description TEXT,
+      operator_id INTEGER,
+      created_at TEXT DEFAULT (datetime('now','localtime'))
+    );
+
+    CREATE TABLE IF NOT EXISTS staged_acceptance (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      request_id INTEGER NOT NULL,
+      stage_name TEXT NOT NULL CHECK(stage_name IN ('main_body','material_docs','invoice_verify','warranty_lock','final')),
+      inspector_id INTEGER,
+      passed INTEGER DEFAULT 0,
+      remark TEXT,
+      created_at TEXT DEFAULT (datetime('now','localtime')),
+      passed_at TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS warranty_locks (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      request_id INTEGER NOT NULL,
+      amount REAL NOT NULL,
+      locked_by INTEGER,
+      lock_reason TEXT,
+      status TEXT DEFAULT 'locked' CHECK(status IN ('locked','released','deducted')),
+      release_reason TEXT,
+      created_at TEXT DEFAULT (datetime('now','localtime')),
+      released_at TEXT
     );
   `);
 
